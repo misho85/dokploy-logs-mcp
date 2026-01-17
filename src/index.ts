@@ -8,6 +8,29 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { sshExec, testConnection } from "./ssh.js";
 
+// Input sanitization to prevent command injection
+function sanitizeName(input: string): string {
+  // Allow only alphanumeric, dashes, underscores, dots, colons (for container IDs)
+  const sanitized = input.replace(/[^a-zA-Z0-9_\-\.:]/g, '');
+  if (sanitized !== input) {
+    throw new Error(`Invalid characters in input: ${input}`);
+  }
+  return sanitized;
+}
+
+function sanitizeTimestamp(input: string): string {
+  // Allow formats like: 1h, 30m, 2024-01-01, 2024-01-01T00:00:00
+  if (!/^[0-9]+[smhd]$|^\d{4}-\d{2}-\d{2}(T[\d:]+)?$/.test(input)) {
+    throw new Error(`Invalid timestamp format: ${input}`);
+  }
+  return input;
+}
+
+function sanitizeGrepPattern(input: string): string {
+  // Escape shell special characters for grep pattern
+  return input.replace(/[;&|`$(){}[\]<>\\!"']/g, '');
+}
+
 // Default SSH host from environment or fallback
 const DEFAULT_SSH_HOST = process.env.SSH_HOST || "dokploy";
 
@@ -161,7 +184,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 // Handle tool calls
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
-  const host = (args?.host as string) || DEFAULT_SSH_HOST;
+  const rawHost = (args?.host as string) || DEFAULT_SSH_HOST;
+  const host = sanitizeName(rawHost);
 
   try {
     switch (name) {
@@ -185,7 +209,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         let command = `docker ps ${showAll} ${format}`;
 
         if (args?.filter) {
-          command += ` | grep -E "NAMES|${args.filter}"`;
+          const safeFilter = sanitizeGrepPattern(args.filter as string);
+          command += ` | grep -E "NAMES|${safeFilter}"`;
         }
 
         const result = await sshExec(command, { host });
@@ -204,12 +229,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (!container) {
           throw new Error("Container name is required");
         }
+        const safeContainer = sanitizeName(container);
 
         const tail = args?.tail ?? 100;
         const timestamps = args?.timestamps !== false ? "-t" : "";
-        const since = args?.since ? `--since ${args.since}` : "";
+        const since = args?.since ? `--since ${sanitizeTimestamp(args.since as string)}` : "";
 
-        const command = `docker logs ${container} --tail ${tail} ${timestamps} ${since} 2>&1`;
+        const command = `docker logs ${safeContainer} --tail ${tail} ${timestamps} ${since} 2>&1`;
         const result = await sshExec(command, { host, timeout: 60000 });
 
         if (result.exitCode !== 0 && !result.stdout) {
@@ -222,7 +248,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "get-container-stats": {
-        const container = args?.container as string || "";
+        const container = args?.container ? sanitizeName(args.container as string) : "";
         const format = '--format "table {{.Name}}\\t{{.CPUPerc}}\\t{{.MemUsage}}\\t{{.NetIO}}"';
         const command = `docker stats --no-stream ${format} ${container}`;
 
@@ -242,8 +268,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (!container) {
           throw new Error("Container name is required");
         }
+        const safeContainer = sanitizeName(container);
 
-        const command = `docker inspect ${container} --format '{{json .}}'`;
+        const command = `docker inspect ${safeContainer} --format '{{json .}}'`;
         const result = await sshExec(command, { host });
 
         if (result.exitCode !== 0) {
@@ -277,11 +304,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (!project) {
           throw new Error("Project name is required");
         }
-
-        const service = args?.service || "";
+        const safeProject = sanitizeName(project);
+        const safeService = args?.service ? sanitizeName(args.service as string) : "";
         const tail = args?.tail ?? 100;
 
-        const command = `docker compose -p ${project} logs --tail ${tail} ${service} 2>&1`;
+        const command = `docker compose -p ${safeProject} logs --tail ${tail} ${safeService} 2>&1`;
         const result = await sshExec(command, { host, timeout: 60000 });
 
         if (result.exitCode !== 0 && !result.stdout) {
